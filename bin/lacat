@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+#
+# (c) Copyright 2014 Hewlett-Packard Development Company, L.P.
+#
+# Licensed under the MIT License.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to permit
+# persons to whom the Software is furnished to do so, subject to the
+# following conditions:
+
+# The above copyright notice and this permission notice shall be included
+# in all copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+# NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+# DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+# OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+# USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# originally written jan23,2014
+# version 20140128 - code stable, repo created -jk
+#
+# NOTES - I play a little loose and assume little endian (x86 world)
+# if the events are getting garbled or just returning no events, and you're not
+# on x86 land.. well..
+
+import csv
+import json
+import optparse
+import re
+from os import system
+from shutil import rmtree
+from sys import stderr, argv
+from tempfile import mkdtemp
+
+cef_re_pairs = re.compile("(\w+)=(.*)")
+cef_re_split = re.compile(" (?=\w+=)")
+
+def parse_cef(s):
+    """ returns dict of k/v extracted from cef string """
+    d = dict()
+    for c in [cef_re_pairs.findall(kv) for kv in cef_re_split.split(s) if kv]:
+        for cc in c:
+            if isinstance(cc, tuple) and len(cc)==2: d[cc[0]] = cc[1]
+    return d
+
+def notice(*s):
+    print >>stderr, "NOTICE:", ' '.join(s)
+
+def get_metadata(f):
+    first = False
+    rows = [r for r in csv.reader(f)]
+    headers = rows[0][0].split()
+    chunks = []
+    for r in rows[1:]:
+        chunkdict = dict(zip(headers, r) )
+        chunks.append(chunkdict)
+    return chunks
+
+def slice(f, start, count):
+    """ move around inside gigantor file and return the gzip'd embed """
+    f.seek(start+256) # offset plus header
+    return f.read(count)
+
+def unzip(d, s):
+    """
+    returns a filehandle to the unzipped content in `s` opened in the dest dir `d`
+    """
+    # I hate not being able to use the python gzip lib but the extraneous
+    # padding causes grief for py gzip, so using system level works
+    fpath = '%s/raw.gz' % d
+    f = open(fpath, 'w')
+    f.write(s)
+    f.close()
+    system('/bin/gunzip %s 2>/dev/null' % fpath)
+    return open('%s/raw' % d)
+
+def hexlify(s):
+    return ' '.join('%x'%ord(i) for i in s)
+
+def find_cef_in_raw_gz(s):
+    """returns generator to clean up records"""
+    rec_delim = "\xab\x6c\x77\x00\x00\x00\x00"
+    tail_delim = "\x00\x00\x01\x43"
+    cef_type = "\x0a\x00\x00\x25"
+    ss = s.split(rec_delim)
+    for r in s.split(rec_delim):
+        # first byte should be our cef_type, otherwise it's diagnostic
+        # don't emit those
+        if not r.startswith( cef_type):
+            continue
+        rec = r[12:] # strip off the cef binary header
+        # strip off the tail delimeter, etc and emit our cef
+        yield rec[:rec.rfind(tail_delim)]
+
+def parse_chunk(gz_str, to_json=False, limit_to=[]):
+    d = mkdtemp(prefix='alcat')
+    raw_gz = unzip(d, gz_str)
+    cef_recs = find_cef_in_raw_gz(raw_gz.read())
+    filters = dict(parse_search(kv) for kv in limit_to)
+    for c in cef_recs:
+        c = c.strip()
+        if not to_json and not filters:
+            # no json, no filter. just output
+            print c
+            continue
+        p_c = parse_cef(c)
+        if filters:
+            # could use set intersection here but want to bypass set
+            # instantiaton
+            match = tuple( p_c.get(fk) == fv for fk,fv in filters.iteritems())
+            if not all(match): continue
+        if to_json: print json.dumps(p_c)
+        else: print c
+    rmtree(d)
+
+def parse_search(kv):
+    """ returns a tuple(k,v) from k=v """
+    equal = kv.find('=')
+    if equal == -1:
+        raise Exception("filter format invalid. should be k=v")
+    return ( kv[:equal], kv[equal+1:] )
+
+def dump_cef(fdat, fcsv, to_json=False, limit_to=[]):
+    f = open(fdat)
+    for chunk in get_metadata(open(fcsv)):
+        # notice('starting chunk', chunk['ChunkId'])
+        gz_str = slice( f, int(chunk['BeginOffset']), int(chunk['Length']))
+        parse_chunk(gz_str, to_json, limit_to=limit_to)
+
+if __name__ == '__main__':
+    usage = """%prog [options] path_to_dat path_to_meta
+
+Extracts cef events from Logger Archive files to stdout
+
+THIS SOFTWARE IS UNSUPPORTED.  USE AT YOUR OWN RISK.
+
+Why is it called lacat?
+    Because "Logger_Archive_cat" was too long to type.
+
+"""
+    parser = optparse.OptionParser(usage=usage)
+    parser.add_option(
+        "-j", "--json", dest="json", action="store_true",
+       default=False, help="export as json instead of raw cef")
+    parser.add_option(
+        "-f", "--filter", dest="filter", action="append", default=[],
+        help="specify a key=val to filter records by. multiple -s k=v allowed")
+    options, args = parser.parse_args()
+    if len(args) < 2:
+        parser.print_help()
+        raise SystemExit
+    f_dat = args[0]
+    f_csv = args[1]
+    dump_cef(f_dat, f_csv, to_json=options.json, limit_to=options.filter)
+
