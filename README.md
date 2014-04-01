@@ -9,6 +9,12 @@ manipulation.
 It is written in python (targetting 2.6.x) using only the standard libraries
 that should be available on all RHEL installations.
 
+## License
+
+See accompanying LICENSE file.
+
+tl;dr - MIT
+
 ## Usage
 
 ```
