@@ -33,42 +33,50 @@
 # on x86 land.. well..
 
 import csv
+import time
+from glob import glob
 import json
 import optparse
 import re
-from os import system
+from os import system, path
 from shutil import rmtree
-from sys import stderr, argv
+from sys import stderr
 from tempfile import mkdtemp
 
+start = time.time()
 cef_re_pairs = re.compile("(\w+)=(.*)")
 cef_re_split = re.compile(" (?=\w+=)")
+
 
 def parse_cef(s):
     """ returns dict of k/v extracted from cef string """
     d = dict()
     for c in [cef_re_pairs.findall(kv) for kv in cef_re_split.split(s) if kv]:
         for cc in c:
-            if isinstance(cc, tuple) and len(cc)==2: d[cc[0]] = cc[1]
+            if isinstance(cc, tuple) and len(cc) == 2:
+                d[cc[0]] = cc[1]
     return d
+
 
 def notice(*s):
     print >>stderr, "NOTICE:", ' '.join(s)
 
+
 def get_metadata(f):
-    first = False
     rows = [r for r in csv.reader(f)]
     headers = rows[0][0].split()
     chunks = []
     for r in rows[1:]:
-        chunkdict = dict(zip(headers, r) )
+        chunkdict = dict(zip(headers, r))
         chunks.append(chunkdict)
     return chunks
 
+
 def slice(f, start, count):
     """ move around inside gigantor file and return the gzip'd embed """
-    f.seek(start+256) # offset plus header
+    f.seek(start+256)  # offset plus header
     return f.read(count)
+
 
 def unzip(d, s):
     """
@@ -83,23 +91,26 @@ def unzip(d, s):
     system('/bin/gunzip %s 2>/dev/null' % fpath)
     return open('%s/raw' % d)
 
+
 def hexlify(s):
-    return ' '.join('%x'%ord(i) for i in s)
+    return ''.join('%x' % ord(i) for i in s)
+
 
 def find_cef_in_raw_gz(s):
     """returns generator to clean up records"""
-    rec_delim = "\xab\x6c\x77\x00\x00\x00\x00"
-    tail_delim = "\x00\x00\x01\x43"
-    cef_type = "\x0a\x00\x00\x25"
-    ss = s.split(rec_delim)
+    rec_delim = "\x00\x00\x00\x00\x00\x00\x00\x00"
+    tail_delim = "\x00\x00\x01"
+    cef_type = "\x43\x45\x46\x3a\x30"
     for r in s.split(rec_delim):
-        # first byte should be our cef_type, otherwise it's diagnostic
-        # don't emit those
-        if not r.startswith( cef_type):
+        if not r.startswith(cef_type):
+            # print('not a cef event', r)
             continue
-        rec = r[12:] # strip off the cef binary header
+        # rec = r[12:] # strip off the cef binary header
+        rec = r
         # strip off the tail delimeter, etc and emit our cef
+        # print(rec[:rec.rfind(tail_delim)], '\n')
         yield rec[:rec.rfind(tail_delim)]
+
 
 def parse_chunk(gz_str, to_json=False, limit_to=[]):
     d = mkdtemp(prefix='alcat')
@@ -116,25 +127,33 @@ def parse_chunk(gz_str, to_json=False, limit_to=[]):
         if filters:
             # could use set intersection here but want to bypass set
             # instantiaton
-            match = tuple( p_c.get(fk) == fv for fk,fv in filters.iteritems())
-            if not all(match): continue
-        if to_json: print json.dumps(p_c)
-        else: print c
+            match = tuple(p_c.get(fk) == fv for fk, fv in filters.iteritems())
+            if not all(match):
+                continue
+        if to_json:
+            print json.dumps(p_c)
+        else:
+            print c
     rmtree(d)
+
 
 def parse_search(kv):
     """ returns a tuple(k,v) from k=v """
     equal = kv.find('=')
     if equal == -1:
         raise Exception("filter format invalid. should be k=v")
-    return ( kv[:equal], kv[equal+1:] )
+    return (kv[:equal], kv[equal+1:])
 
-def dump_cef(fdat, fcsv, to_json=False, limit_to=[]):
-    f = open(fdat)
-    for chunk in get_metadata(open(fcsv)):
-        # notice('starting chunk', chunk['ChunkId'])
-        gz_str = slice( f, int(chunk['BeginOffset']), int(chunk['Length']))
-        parse_chunk(gz_str, to_json, limit_to=limit_to)
+
+def dump_cef(fileList, to_json=False, limit_to=[]):
+    for pair in fileList:
+        fdat = pair[0]
+        fcsv = pair[1]
+        f = open(fdat)
+        for chunk in get_metadata(open(fcsv)):
+            # notice('starting chunk', chunk['ChunkId'])
+            gz_str = slice(f, int(chunk['BeginOffset']), int(chunk['Length']))
+            parse_chunk(gz_str, to_json, limit_to=limit_to)
 
 if __name__ == '__main__':
     usage = """%prog [options] path_to_dat path_to_meta
@@ -150,15 +169,41 @@ Why is it called lacat?
     parser = optparse.OptionParser(usage=usage)
     parser.add_option(
         "-j", "--json", dest="json", action="store_true",
-       default=False, help="export as json instead of raw cef")
+        default=False, help="export as json instead of raw cef")
     parser.add_option(
         "-f", "--filter", dest="filter", action="append", default=[],
         help="specify a key=val to filter records by. multiple -s k=v allowed")
+    parser.add_option(
+        "-d", "--directory", dest="directory", action="append", default=[],
+        help="specify a directory full of dat and csv files")
+    parser.add_option(
+        "-o", "--output", dest="output", action="append", default=[],
+        help="specify a output directory")
     options, args = parser.parse_args()
-    if len(args) < 2:
+
+    # ArcSight_Data_46_0504403158265495552.dat
+    # ArcSight_Metadata_46_504403158265495552.csv
+    if options.directory:
+        # user wants to scan through an entire directory
+        csvFiles = glob(options.directory[0] + '*.csv')  # creates list of csv files
+        fileList = []
+        for csvFile in csvFiles:
+            datFinder = path.basename(csvFile)[18:-4].split('_')  # returns list of significant digits
+            # ArcSight_Metadata_46_504403158265495552.csv = ['46', '504403158265495552']
+            # we need the significant digits because the archive loggers sometimes pad with extra zero
+            datFile = (glob(options.directory[0] + '*' + datFinder[0] + '*' + datFinder[1] + '*.dat'))
+            # datFile returns list of single file matching the csv significant digits
+            fileList.append((datFile[0], csvFile))  # nice list of (CSV,DAT) tuples
+
+    elif len(args) == 2:
+        # user manually specifies the dat and csv files
+        f_dat = args[0]
+        f_csv = args[1]
+        fileList = [(args[0], args[1])]
+
+    elif len(args) < 2:
         parser.print_help()
         raise SystemExit
-    f_dat = args[0]
-    f_csv = args[1]
-    dump_cef(f_dat, f_csv, to_json=options.json, limit_to=options.filter)
 
+    dump_cef(fileList, to_json=options.json, limit_to=options.filter)
+    # print(time.time() - start)
