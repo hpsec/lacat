@@ -191,7 +191,7 @@ Why is it called lacat?
             datFinder = path.basename(csvFile)[18:-4].split('_')  # returns list of significant digits
             # ArcSight_Metadata_46_504403158265495552.csv = ['46', '504403158265495552']
             # we need the significant digits because the archive loggers sometimes pad with extra zero
-            datFile = (glob(options.directory[0] + '*' + datFinder[0] + '*' + datFinder[1] + '*.dat'))
+            datFile = (glob(options.directory[0] + '*_' + datFinder[0] + '_*' + datFinder[1] + '*.dat'))
             # datFile returns list of single file matching the csv significant digits
             fileList.append((datFile[0], csvFile))  # nice list of (CSV,DAT) tuples
 
