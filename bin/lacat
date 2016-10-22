@@ -27,23 +27,23 @@
 #
 # originally written jan23,2014
 # version 20140128 - code stable, repo created -jk
-#
-# NOTES - I play a little loose and assume little endian (x86 world)
-# if the events are getting garbled or just returning no events, and you're not
-# on x86 land.. well..
+# version 20161021 - fixed archive parsing, port to python 3 -jm
+
+from __future__ import print_function, unicode_literals, division
 
 import csv
-import time
 from glob import glob
 import json
 import optparse
+import gzip
 import re
-from os import system, path
-from shutil import rmtree
+import struct
+import io
+from os import path
 from sys import stderr
-from tempfile import mkdtemp
 
-start = time.time()
+#start_time = time.time()
+# FIXME: redo CEF parser
 cef_re_pairs = re.compile("(\w+)=(.*)")
 cef_re_split = re.compile(" (?=\w+=)")
 
@@ -58,70 +58,44 @@ def parse_cef(s):
     return d
 
 
-def notice(*s):
-    print >>stderr, "NOTICE:", ' '.join(s)
-
-
 def get_metadata(f):
-    rows = [r for r in csv.reader(f)]
-    headers = rows[0][0].split()
-    chunks = []
-    for r in rows[1:]:
-        chunkdict = dict(zip(headers, r))
-        chunks.append(chunkdict)
-    return chunks
+    rows = list(f)
+    # Why is the first row space separated, instead of comma separated?
+    rows[0] = rows[0].replace(" ",",")
+    return list(csv.DictReader(rows))
 
 
-def slice(f, start, count):
+def read_chunk(f, start, count):
     """ move around inside gigantor file and return the gzip'd embed """
     f.seek(start+256)  # offset plus header
-    return f.read(count)
+    chunk = io.BytesIO(f.read(count-256))
+    return gzip.GzipFile(fileobj=chunk)
 
 
-def unzip(d, s):
-    """
-    returns a filehandle to the unzipped content in `s` opened in the dest dir `d`
-    """
-    # I hate not being able to use the python gzip lib but the extraneous
-    # padding causes grief for py gzip, so using system level works
-    fpath = '%s/raw.gz' % d
-    f = open(fpath, 'w')
-    f.write(s)
-    f.close()
-    system('/bin/gunzip %s 2>/dev/null' % fpath)
-    return open('%s/raw' % d)
+def find_cef_in_raw_gz(f, event_count):
+    # We have to read some bytes from a tiny header, but we don't do anything
+    # with those bytes.
+    zero, length = struct.unpack(">hh", f.read(4))
+    recv_name = f.read(length)
+    # XXX: Why is there a zero here?
+    zero = f.read(4)
+
+    for _ in range(event_count):
+        unpacked = struct.unpack(">qllqq", f.read(32))
+        (time, length, recv_id, dvc_ip, zero) = unpacked
+        event = f.read(length).decode('utf-8')
+        # strip off syslog header, if present
+        yield event[event.index(u"CEF:0"):]
 
 
-def hexlify(s):
-    return ''.join('%x' % ord(i) for i in s)
-
-
-def find_cef_in_raw_gz(s):
-    """returns generator to clean up records"""
-    rec_delim = "\x00\x00\x00\x00\x00\x00\x00\x00"
-    tail_delim = "\x00\x00\x01"
-    cef_type = "\x43\x45\x46\x3a\x30"
-    for r in s.split(rec_delim):
-        if not r.startswith(cef_type):
-            # print('not a cef event', r)
-            continue
-        # rec = r[12:] # strip off the cef binary header
-        rec = r
-        # strip off the tail delimeter, etc and emit our cef
-        # print(rec[:rec.rfind(tail_delim)], '\n')
-        yield rec[:rec.rfind(tail_delim)]
-
-
-def parse_chunk(gz_str, to_json=False, limit_to=[]):
-    d = mkdtemp(prefix='alcat')
-    raw_gz = unzip(d, gz_str)
-    cef_recs = find_cef_in_raw_gz(raw_gz.read())
+def parse_chunk(chunk, event_count, to_json=False, limit_to=[]):
+    cef_recs = find_cef_in_raw_gz(chunk, event_count)
     filters = dict(parse_search(kv) for kv in limit_to)
     for c in cef_recs:
         c = c.strip()
         if not to_json and not filters:
             # no json, no filter. just output
-            print c
+            print(c)
             continue
         p_c = parse_cef(c)
         if filters:
@@ -131,10 +105,9 @@ def parse_chunk(gz_str, to_json=False, limit_to=[]):
             if not all(match):
                 continue
         if to_json:
-            print json.dumps(p_c)
+            print(json.dumps(p_c))
         else:
-            print c
-    rmtree(d)
+            print(c)
 
 
 def parse_search(kv):
@@ -146,14 +119,21 @@ def parse_search(kv):
 
 
 def dump_cef(fileList, to_json=False, limit_to=[]):
-    for pair in fileList:
-        fdat = pair[0]
-        fcsv = pair[1]
-        f = open(fdat)
-        for chunk in get_metadata(open(fcsv)):
-            # notice('starting chunk', chunk['ChunkId'])
-            gz_str = slice(f, int(chunk['BeginOffset']), int(chunk['Length']))
-            parse_chunk(gz_str, to_json, limit_to=limit_to)
+    for fdat, fcsv in fileList:
+        if fcsv.endswith('.gz'):
+            with gzip.open(fcsv,'rt') as f:
+                metadata = get_metadata(f)
+        else:
+            with open(fcsv,'rt') as f:
+                metadata = get_metadata(f)
+
+        with open(fdat,'rb') as f:
+            for chunk_md in metadata:
+                start = int(chunk_md['BeginOffset'])
+                chunk_length = int(chunk_md['Length'])
+                event_count = int(chunk_md['EventCount'])
+                with read_chunk(f, start, chunk_length) as chunk:
+                    parse_chunk(chunk, event_count, to_json, limit_to=limit_to)
 
 if __name__ == '__main__':
     usage = """%prog [options] path_to_dat path_to_meta
@@ -185,10 +165,14 @@ Why is it called lacat?
     # ArcSight_Metadata_46_504403158265495552.csv
     if options.directory:
         # user wants to scan through an entire directory
-        csvFiles = glob(options.directory[0] + '*.csv')  # creates list of csv files
+        csvFiles = (
+            glob(options.directory[0] + '*.csv') +
+            glob(options.directory[0] + '*.csv.gz')
+        )
         fileList = []
         for csvFile in csvFiles:
-            datFinder = path.basename(csvFile)[18:-4].split('_')  # returns list of significant digits
+            csv_path = csvFile.rstrip('.gz').rstrip('.csv')
+            datFinder = path.basename(csv_path)[18:].split('_')  # returns list of significant digits
             # ArcSight_Metadata_46_504403158265495552.csv = ['46', '504403158265495552']
             # we need the significant digits because the archive loggers sometimes pad with extra zero
             datFile = (glob(options.directory[0] + '*_' + datFinder[0] + '_*' + datFinder[1] + '*.dat'))
@@ -206,4 +190,4 @@ Why is it called lacat?
         raise SystemExit
 
     dump_cef(fileList, to_json=options.json, limit_to=options.filter)
-    # print(time.time() - start)
+    # print(time.time() - start_time)
