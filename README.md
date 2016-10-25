@@ -6,8 +6,9 @@ It prints them to stdout by design, allowing the user to redirect them to a
 file or pipe them into something else (grep, awk, whatever) for further
 manipulation.
 
-It is written in python (targetting 2.6.x) using only the standard libraries
-that should be available on all RHEL installations.
+It is written in python (targetting 2.7 and 3.5) using only the standard
+python library.  If you want to use the kafka integration, you will need to
+intall the optional `kafka-python` dependency.
 
 ## License
 
@@ -31,6 +32,13 @@ Options:
   -f FILTER, --filter=FILTER
                         specify a key=val to filter records by. multiple -s
                         k=v allowed
+  -d DIRECTORY, --directory=DIRECTORY
+                        specify a directory full of dat and csv files
+  -k KAFKA_TOPIC, --kafka-topic=KAFKA_TOPIC
+                        send events to kafka topic
+  --kafka-servers=KAFKA_SERVERS
+                        connect to kafka server name (can be comma-separated
+                        list)
 ```
 
 The usage is hopefully quite straightforward and the implementation is quite
@@ -42,12 +50,24 @@ back here for revisions.
 Place the file `lacat` in your path and make the file executable:
 `chmod +x lacat.`
 
+If you want to use the kafka integration install the kafka library:
+
+```
+pip install kafka-python
+```
+
 ## Examples
 
 Export raw CEF and capture in the file outfile.cef
 
 ```
 ./lacat ArcSight_Data_1_0504403158265495556.dat ArcSight_Metadata_1_504403158265495556.csv  > outfile.cef
+```
+
+Export raw CEF and send to a Kafka cluster
+
+```
+./lacat ArcSight_Data_1_0504403158265495556.dat ArcSight_Metadata_1_504403158265495556.csv -k lacat-events --kafka-servers=kafka1:9092,kafka2:9092,kafka3:9092
 ```
 
 Export all CEF records, one per line in JSON format, and capture in outfile.json

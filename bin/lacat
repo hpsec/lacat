@@ -28,6 +28,7 @@
 # originally written jan23,2014
 # version 20140128 - code stable, repo created -jk
 # version 20161021 - fixed archive parsing, port to python 3 -jm
+# version 20161024 - write to kafka, add back support for python 2 -jm
 
 from __future__ import print_function, unicode_literals, division
 
@@ -38,10 +39,19 @@ import optparse
 import gzip
 import re
 import struct
-import io
 from os import path
-from sys import stderr
-from kafka import KafkaProducer
+import sys
+
+# We could use the six library for this, but I would rather not have any deps.
+PY2 = sys.version_info[0] == 2
+range = xrange if PY2 else range
+iteritems = dict.iteritems if PY2 else dict.items
+text_read_mode = 'r' if PY2 else 'rt'
+if PY2:
+    from StringIO import StringIO as BytesIO
+else:
+    from io import BytesIO
+
 
 #start_time = time.time()
 cef_key_re = re.compile(r" ([\w.-]+?)=")
@@ -115,7 +125,7 @@ def get_metadata(f):
 def read_chunk(f, start, count):
     """ move around inside gigantor file and return the gzip'd embed """
     f.seek(start+256)  # offset plus header
-    chunk = io.BytesIO(f.read(count-256))
+    chunk = BytesIO(f.read(count-256))
     return gzip.GzipFile(fileobj=chunk)
 
 
@@ -123,9 +133,8 @@ def parse_chunk(f, event_count):
     # We have to read some bytes from a tiny header, but we don't do anything
     # with those bytes.
     zero, length = struct.unpack(">hh", f.read(4))
-    recv_name = f.read(length)
-    # XXX: Why is there a zero here?
-    zero = f.read(4)
+    # skip the reciever name and an int32 after it.
+    f.read(length + 4)
 
     for _ in range(event_count):
         unpacked = struct.unpack(">qllqq", f.read(32))
@@ -147,7 +156,10 @@ def dump_cef(cef_recs, to_json=False, limit_to=[]):
         if filters:
             # could use set intersection here but want to bypass set
             # instantiaton
-            match = tuple(p_c.get(fk) == fv for fk, fv in filters.items())
+            match = tuple(
+                p_c.get(fk) == fv
+                for fk, fv in iteritems(filters)
+            )
             if not all(match):
                 continue
         if to_json:
@@ -156,6 +168,7 @@ def dump_cef(cef_recs, to_json=False, limit_to=[]):
             print(c)
 
 def send_kafka(cef_recs, topic, servers):
+    from kafka import KafkaProducer
     producer = KafkaProducer(
         bootstrap_servers=servers,
         compression_type='gzip',
@@ -178,10 +191,10 @@ def parse_search(kv):
 def read_cef(file_list):
     for fdat, fcsv in file_list:
         if fcsv.endswith('.gz'):
-            with gzip.open(fcsv,'rt') as f:
+            with gzip.open(fcsv, text_read_mode) as f:
                 metadata = get_metadata(f)
         else:
-            with open(fcsv,'rt') as f:
+            with open(fcsv, text_read_mode) as f:
                 metadata = get_metadata(f)
 
         with open(fdat,'rb') as f:
