@@ -41,6 +41,7 @@ import struct
 import io
 from os import path
 from sys import stderr
+from kafka import KafkaProducer
 
 #start_time = time.time()
 # FIXME: redo CEF parser
@@ -72,7 +73,7 @@ def read_chunk(f, start, count):
     return gzip.GzipFile(fileobj=chunk)
 
 
-def find_cef_in_raw_gz(f, event_count):
+def parse_chunk(f, event_count):
     # We have to read some bytes from a tiny header, but we don't do anything
     # with those bytes.
     zero, length = struct.unpack(">hh", f.read(4))
@@ -88,8 +89,7 @@ def find_cef_in_raw_gz(f, event_count):
         yield event[event.index(u"CEF:0"):]
 
 
-def parse_chunk(chunk, event_count, to_json=False, limit_to=[]):
-    cef_recs = find_cef_in_raw_gz(chunk, event_count)
+def dump_cef(cef_recs, to_json=False, limit_to=[]):
     filters = dict(parse_search(kv) for kv in limit_to)
     for c in cef_recs:
         c = c.strip()
@@ -109,6 +109,17 @@ def parse_chunk(chunk, event_count, to_json=False, limit_to=[]):
         else:
             print(c)
 
+def send_kafka(cef_recs, topic, servers):
+    producer = KafkaProducer(
+        bootstrap_servers=servers,
+        compression_type='gzip',
+        #compression_type='snappy',
+    )
+    for event in cef_recs:
+        producer.send(topic, event.encode('utf-8'))
+    producer.flush()
+    producer.close()
+
 
 def parse_search(kv):
     """ returns a tuple(k,v) from k=v """
@@ -118,8 +129,8 @@ def parse_search(kv):
     return (kv[:equal], kv[equal+1:])
 
 
-def dump_cef(fileList, to_json=False, limit_to=[]):
-    for fdat, fcsv in fileList:
+def read_cef(file_list):
+    for fdat, fcsv in file_list:
         if fcsv.endswith('.gz'):
             with gzip.open(fcsv,'rt') as f:
                 metadata = get_metadata(f)
@@ -133,7 +144,9 @@ def dump_cef(fileList, to_json=False, limit_to=[]):
                 chunk_length = int(chunk_md['Length'])
                 event_count = int(chunk_md['EventCount'])
                 with read_chunk(f, start, chunk_length) as chunk:
-                    parse_chunk(chunk, event_count, to_json, limit_to=limit_to)
+                    for event in parse_chunk(chunk, event_count):
+                        yield event
+
 
 if __name__ == '__main__':
     usage = """%prog [options] path_to_dat path_to_meta
@@ -157,8 +170,16 @@ Why is it called lacat?
         "-d", "--directory", dest="directory", action="append", default=[],
         help="specify a directory full of dat and csv files")
     parser.add_option(
-        "-o", "--output", dest="output", action="append", default=[],
-        help="specify a output directory")
+        "-k", "--kafka-topic", dest="kafka_topic", action="store",
+        help="send events to kafka topic")
+    # check that you can clear default for kafka-servers
+    parser.add_option(
+        "--kafka-servers", dest="kafka_servers", action="store",
+        default='localhost:9092',
+        help="connect to kafka with server name (can be comma-separated list)")
+    #parser.add_option(
+    #    "-o", "--output", dest="output", action="append", default=[],
+    #    help="specify a output directory")
     options, args = parser.parse_args()
 
     # ArcSight_Data_46_0504403158265495552.dat
@@ -169,7 +190,7 @@ Why is it called lacat?
             glob(options.directory[0] + '*.csv') +
             glob(options.directory[0] + '*.csv.gz')
         )
-        fileList = []
+        file_list = []
         for csvFile in csvFiles:
             csv_path = csvFile.rstrip('.gz').rstrip('.csv')
             datFinder = path.basename(csv_path)[18:].split('_')  # returns list of significant digits
@@ -177,17 +198,27 @@ Why is it called lacat?
             # we need the significant digits because the archive loggers sometimes pad with extra zero
             datFile = (glob(options.directory[0] + '*_' + datFinder[0] + '_*' + datFinder[1] + '*.dat'))
             # datFile returns list of single file matching the csv significant digits
-            fileList.append((datFile[0], csvFile))  # nice list of (CSV,DAT) tuples
+            file_list.append((datFile[0], csvFile))  # nice list of (CSV,DAT) tuples
+        if not file_list:
+            raise ValueError("No files found in directory.")
 
     elif len(args) == 2:
         # user manually specifies the dat and csv files
         f_dat = args[0]
         f_csv = args[1]
-        fileList = [(args[0], args[1])]
+        file_list = [(args[0], args[1])]
 
     elif len(args) < 2:
         parser.print_help()
         raise SystemExit
 
-    dump_cef(fileList, to_json=options.json, limit_to=options.filter)
+    events = read_cef(file_list)
+    if options.kafka_topic:
+        send_kafka(
+            events,
+            options.kafka_topic,
+            options.kafka_servers,
+        )
+    else:
+        dump_cef(events, to_json=options.json, limit_to=options.filter)
     # print(time.time() - start_time)
