@@ -8,7 +8,7 @@ manipulation.
 
 It is written in python (targetting 2.7 and 3.5) using only the standard
 python library.  If you want to use the kafka integration, you will need to
-intall the optional `kafka-python` dependency.
+install the optional `kafka-python` dependency.
 
 ## License
 
